@@ -71,6 +71,7 @@ mod migrate_rollouts;
 mod plugin_cmd;
 mod queue_cmd;
 mod remote_control_cmd;
+mod restart_after_update;
 #[cfg(target_os = "windows")]
 mod sandbox_setup;
 mod state_db_recovery;
@@ -739,6 +740,7 @@ fn parse_socket_path(raw: &str) -> Result<AbsolutePathBuf, String> {
 fn handle_app_exit(
     exit_info: AppExitInfo,
     cli_executable: Option<&std::path::Path>,
+    relaunch_args: &[std::ffi::OsString],
 ) -> anyhow::Result<()> {
     let is_fatal = match &exit_info.exit_reason {
         ExitReason::Fatal(message) => {
@@ -764,6 +766,13 @@ fn handle_app_exit(
     }
     if let Some(action) = update_action {
         run_update_action(action, cli_executable)?;
+        if !matches!(action, UpdateAction::Daemon(_)) {
+            if restart_after_update::was_relaunched_after_update() {
+                println!("Please restart Codex.");
+            } else {
+                restart_after_update::relaunch_codex(relaunch_args)?;
+            }
+        }
     }
     Ok(())
 }
@@ -832,7 +841,7 @@ fn run_update_action(
     if !status.success() {
         anyhow::bail!("`{cmd_str}` failed with status {status}");
     }
-    println!("\n🎉 Update ran successfully! Please restart Codex.");
+    println!("\n🎉 Update ran successfully!");
     Ok(())
 }
 
@@ -868,7 +877,9 @@ fn run_update_command() -> anyhow::Result<()> {
                 "Could not detect the Codex installation method. Please update manually: https://developers.openai.com/codex/cli/"
             );
         };
-        run_update_action(action, /*cli_executable*/ None)
+        run_update_action(action, /*cli_executable*/ None)?;
+        println!("Please restart Codex.");
+        Ok(())
     }
 }
 
@@ -1024,6 +1035,7 @@ async fn cli_main(
     arg0_paths: Arg0DispatchPaths,
     remote_control_disabled: bool,
 ) -> anyhow::Result<()> {
+    let relaunch_args = std::env::args_os().skip(1).collect::<Vec<_>>();
     let MultitoolCli {
         config_overrides: mut root_config_overrides,
         feature_toggles,
@@ -1126,7 +1138,7 @@ async fn cli_main(
                 arg0_paths.clone(),
             )
             .await?;
-            handle_app_exit(exit_info, daemon_cli_executable.as_deref())?;
+            handle_app_exit(exit_info, daemon_cli_executable.as_deref(), &relaunch_args)?;
         }
         Some(Subcommand::TcpTunnel(args)) => {
             return codex_tcp_tunnel::run(args).await;
@@ -1461,7 +1473,7 @@ async fn cli_main(
                 arg0_paths.clone(),
             )
             .await?;
-            handle_app_exit(exit_info, daemon_cli_executable.as_deref())?;
+            handle_app_exit(exit_info, daemon_cli_executable.as_deref(), &relaunch_args)?;
         }
         Some(Subcommand::Archive(cmd)) => {
             let output = run_session_archive_cli_command(
@@ -1548,7 +1560,7 @@ async fn cli_main(
                 arg0_paths.clone(),
             )
             .await?;
-            handle_app_exit(exit_info, daemon_cli_executable.as_deref())?;
+            handle_app_exit(exit_info, daemon_cli_executable.as_deref(), &relaunch_args)?;
         }
         Some(Subcommand::Login(mut login_cli)) => {
             reject_remote_mode_for_subcommand(
